@@ -1,0 +1,5 @@
+{
+  "name": "RevFlow",
+  "description": "RevFlow: An AI-powered application to streamline systematic reviews. It generates descriptions and data extraction templates, then extracts data from uploaded articles (TXT/PDF) into a downloadable CSV.",
+  "requestFramePermissions": []
+}
