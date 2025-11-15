@@ -9,7 +9,7 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "strict": true,
-    "types": ["node"]
+    
   },
   "include": ["src", "**/*.ts", "**/*.tsx"],
   "exclude": ["vite.config.ts"]
