@@ -24,6 +24,21 @@ export type ExtractedDataRow = {
   [key: string]: string;
 };
 
+// ExtractionResult extends ExtractedDataRow with tracking metadata
+export interface ExtractionResult extends ExtractedDataRow {
+  _extractionStatus?: 'success' | 'failed';
+  _articleFile?: ArticleFile; // Store original file for re-extraction
+}
+
+// Response type for batch extraction
+export interface BatchExtractionResponse {
+  results: Array<{
+    articleName: string;
+    data: Omit<ExtractedDataRow, 'Article Name'>;
+    success: boolean;
+  }>;
+}
+
 // This mirrors the schema from the Gemini API for typing
 export const GeminiSchema = {
   type: Type.OBJECT,

@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Step } from './types';
-import type { TemplateField, ArticleFile, ExtractedDataRow } from './types';
-import { generateDescription, generateTemplate, extractDataFromArticle } from './services/geminiService';
+import type { TemplateField, ArticleFile, ExtractionResult } from './types';
+import { generateDescription, generateTemplate, extractDataFromArticle, extractDataFromArticlesBatch } from './services/geminiService';
 
 import TitleInput from './components/TitleInput';
 import DescriptionEditor from './components/DescriptionEditor';
@@ -17,7 +17,7 @@ const App: React.FC = () => {
   const [description, setDescription] = useState<string>('');
   const [template, setTemplate] = useState<TemplateField[]>([]);
 
-  const [extractedData, setExtractedData] = useState<ExtractedDataRow[]>([]);
+  const [extractedData, setExtractedData] = useState<ExtractionResult[]>([]);
   
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
@@ -26,6 +26,7 @@ const App: React.FC = () => {
   const [fileReadProgress, setFileReadProgress] = useState<number | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionProgress, setExtractionProgress] = useState<number | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -57,6 +58,7 @@ const App: React.FC = () => {
     setIsLoading(false);
     setIsReadingFiles(false);
     setIsExtracting(false);
+    setIsRetrying(false);
     setFileReadProgress(null);
     setExtractionProgress(null);
     setStep(Step.TITLE);
@@ -98,6 +100,133 @@ const App: React.FC = () => {
     }
   }, []);
   
+  /**
+   * Process articles in batches of 3, with automatic fallback to individual extraction
+   * if batch processing fails
+   */
+  const performBatchExtraction = useCallback(async (
+    articlesToProcess: Array<{ article: ArticleFile; originalIndex: number }>
+  ): Promise<ExtractionResult[]> => {
+    const BATCH_SIZE = 3;
+    const results: ExtractionResult[] = [];
+    const totalArticles = articlesToProcess.length;
+    
+    // Process in batches
+    for (let i = 0; i < articlesToProcess.length; i += BATCH_SIZE) {
+      const batchItems = articlesToProcess.slice(i, Math.min(i + BATCH_SIZE, articlesToProcess.length));
+      const batchArticles = batchItems.map(item => item.article);
+      const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(articlesToProcess.length / BATCH_SIZE);
+      
+      setLoadingMessage(`Processing batch ${batchNumber} of ${totalBatches} (${batchArticles.length} articles)`);
+      
+      try {
+        // Try batch extraction first
+        const batchResponse = await extractDataFromArticlesBatch(batchArticles, template);
+        
+        // Process each result in the batch
+        for (let j = 0; j < batchResponse.results.length; j++) {
+          const result = batchResponse.results[j];
+          const batchItem = batchItems[j];
+          
+          if (result.success && Object.keys(result.data).length > 0) {
+            // Batch extraction succeeded for this article
+            results.push({
+              'Article Name': result.articleName,
+              ...result.data,
+              _extractionStatus: 'success',
+              _articleFile: batchItem.article
+            });
+          } else {
+            // Batch extraction failed for this article, try individual fallback
+            console.log(`Batch extraction failed for ${result.articleName}, trying individual extraction...`);
+            try {
+              const individualData = await extractDataFromArticle(batchItem.article, template);
+              const hasValidData = Object.keys(individualData).length > 0;
+              
+              if (hasValidData) {
+                results.push({
+                  'Article Name': result.articleName,
+                  ...individualData,
+                  _extractionStatus: 'success',
+                  _articleFile: batchItem.article
+                });
+              } else {
+                // Individual extraction also failed
+                const failedRow: ExtractionResult = {
+                  'Article Name': result.articleName,
+                  _extractionStatus: 'failed',
+                  _articleFile: batchItem.article
+                };
+                template.forEach(field => {
+                  failedRow[field.field] = "Extraction Failed";
+                });
+                results.push(failedRow);
+              }
+            } catch (err) {
+              console.error(`Individual extraction also failed for ${result.articleName}:`, err);
+              const failedRow: ExtractionResult = {
+                'Article Name': result.articleName,
+                _extractionStatus: 'failed',
+                _articleFile: batchItem.article
+              };
+              template.forEach(field => {
+                failedRow[field.field] = "Extraction Failed";
+              });
+              results.push(failedRow);
+            }
+          }
+        }
+      } catch (batchError) {
+        // Entire batch failed, fall back to individual extraction for all articles in batch
+        console.error('Entire batch failed, falling back to individual extraction:', batchError);
+        
+        for (const batchItem of batchItems) {
+          try {
+            const individualData = await extractDataFromArticle(batchItem.article, template);
+            const hasValidData = Object.keys(individualData).length > 0;
+            
+            if (hasValidData) {
+              results.push({
+                'Article Name': batchItem.article.name,
+                ...individualData,
+                _extractionStatus: 'success',
+                _articleFile: batchItem.article
+              });
+            } else {
+              const failedRow: ExtractionResult = {
+                'Article Name': batchItem.article.name,
+                _extractionStatus: 'failed',
+                _articleFile: batchItem.article
+              };
+              template.forEach(field => {
+                failedRow[field.field] = "Extraction Failed";
+              });
+              results.push(failedRow);
+            }
+          } catch (err) {
+            console.error(`Individual extraction failed for ${batchItem.article.name}:`, err);
+            const failedRow: ExtractionResult = {
+              'Article Name': batchItem.article.name,
+              _extractionStatus: 'failed',
+              _articleFile: batchItem.article
+            };
+            template.forEach(field => {
+              failedRow[field.field] = "Extraction Failed";
+            });
+            results.push(failedRow);
+          }
+        }
+      }
+      
+      // Update progress after each batch
+      const processedCount = Math.min(i + BATCH_SIZE, totalArticles);
+      setExtractionProgress((processedCount / totalArticles) * 100);
+    }
+    
+    return results;
+  }, [template]);
+  
   const handleDataExtraction = useCallback(async (filesToProcess: File[]) => {
       // 1. File Reading Phase
       setIsReadingFiles(true);
@@ -135,34 +264,78 @@ const App: React.FC = () => {
 
       setTimeout(() => { setIsReadingFiles(false) }, 500); // allow progress bar to hit 100%
 
-      // 2. AI Extraction Phase (Inline progress)
+      // 2. AI Extraction Phase (Batch processing)
       setIsExtracting(true);
       setExtractionProgress(0);
       
-      const allExtractedData: ExtractedDataRow[] = [];
+      // Prepare articles with their indices for batch processing
+      const articlesWithIndices = readArticles.map((article, index) => ({
+        article,
+        originalIndex: index
+      }));
       
-      for(let i = 0; i < readArticles.length; i++) {
-          const article = readArticles[i];
-          setLoadingMessage(`Extracting from ${article.name}`); // message for screen readers/future use
-          try {
-              const data = await extractDataFromArticle(article, template);
-              allExtractedData.push({ 'Article Name': article.name, ...data });
-          } catch (err) {
-              console.error(`Failed to process ${article.name}`, err);
-              const errorRow: ExtractedDataRow = {'Article Name': article.name};
-              template.forEach(field => {
-                  errorRow[field.field] = "Extraction Failed";
-              });
-              allExtractedData.push(errorRow);
-          }
-          setExtractionProgress(((i + 1) / readArticles.length) * 100);
-      }
+      // Use batch extraction
+      const allExtractedData = await performBatchExtraction(articlesWithIndices);
       
       setExtractedData(allExtractedData);
       setStep(Step.RESULTS);
       setIsExtracting(false);
       setExtractionProgress(null);
-  }, [template]);
+  }, [template, performBatchExtraction]);
+  
+  /**
+   * Retry extraction for failed articles only
+   */
+  const handleRetryFailed = useCallback(async () => {
+    setIsRetrying(true);
+    setIsExtracting(true);
+    setExtractionProgress(0);
+    setError(null);
+    
+    // Find all failed extractions
+    const failedExtractions = extractedData.filter(row => row._extractionStatus === 'failed');
+    
+    if (failedExtractions.length === 0) {
+      setIsRetrying(false);
+      setIsExtracting(false);
+      return;
+    }
+    
+    // Prepare failed articles for re-extraction
+    const failedArticles = failedExtractions
+      .filter(row => row._articleFile) // Filter out any without article data first
+      .map((row, index) => ({
+        article: row._articleFile!,
+        originalIndex: index
+      }));
+    
+    if (failedArticles.length === 0) {
+      setError('No article data available for retry');
+      setIsRetrying(false);
+      setIsExtracting(false);
+      return;
+    }
+    
+    // Retry extraction using batch processing
+    const retryResults = await performBatchExtraction(failedArticles);
+    
+    // Merge retry results back into extractedData
+    const updatedData = extractedData.map(row => {
+      if (row._extractionStatus === 'failed') {
+        // Find the retry result for this article
+        const retryResult = retryResults.find(r => r['Article Name'] === row['Article Name']);
+        if (retryResult) {
+          return retryResult;
+        }
+      }
+      return row;
+    });
+    
+    setExtractedData(updatedData);
+    setIsRetrying(false);
+    setIsExtracting(false);
+    setExtractionProgress(null);
+  }, [extractedData, template, performBatchExtraction]);
 
   const stepIndex = stepOrder.indexOf(step === Step.EXTRACTING ? Step.RESULTS : step);
   
@@ -225,7 +398,12 @@ const App: React.FC = () => {
           
           {step === Step.RESULTS && (
              <section ref={sectionRefs[Step.RESULTS]} id="results-section" aria-labelledby="results-heading" className="bg-gray-800 p-8 sm:p-10 rounded-xl shadow-lg border border-gray-700">
-               <ResultsTable data={extractedData} onStartOver={handleStartOver} />
+               <ResultsTable 
+                 data={extractedData} 
+                 onStartOver={handleStartOver}
+                 onRetryFailed={handleRetryFailed}
+                 isRetrying={isRetrying}
+               />
             </section>
           )}
       </main>
