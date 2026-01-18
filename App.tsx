@@ -11,6 +11,10 @@ import Loader from './components/Loader';
 
 const stepOrder = [Step.TITLE, Step.DESCRIPTION, Step.TEMPLATE_UPLOAD, Step.RESULTS];
 
+// Batch processing configuration
+const BATCH_SIZE = 3; // Process 3 articles per API request for optimal quota usage
+const MAX_RETRIES = 2; // Maximum retry attempts with exponential backoff
+
 const App: React.FC = () => {
   const [step, setStep] = useState<Step>(Step.TITLE);
   const [title, setTitle] = useState<string>('');
@@ -143,12 +147,10 @@ const App: React.FC = () => {
       setExtractionProgress(0);
       
       const allExtractedData: ExtractedDataRow[] = [];
-      const maxRetries = 2;
-      const batchSize = 3; // Process 3 articles per API request
       
-      // Process articles in batches of 3
-      for(let i = 0; i < readArticles.length; i += batchSize) {
-          const batch = readArticles.slice(i, i + batchSize);
+      // Process articles in batches
+      for(let i = 0; i < readArticles.length; i += BATCH_SIZE) {
+          const batch = readArticles.slice(i, i + BATCH_SIZE);
           const batchNames = batch.map(a => a.name).join(', ');
           
           try {
@@ -156,7 +158,7 @@ const App: React.FC = () => {
               setLoadingMessage(`Extracting from ${batch.length} article(s): ${batchNames}`);
               
               // Extract data from the batch
-              const batchResults = await extractDataFromArticleBatch(batch, template, maxRetries);
+              const batchResults = await extractDataFromArticleBatch(batch, template, MAX_RETRIES);
               
               // Process each result from the batch
               batchResults.forEach(result => {
@@ -186,7 +188,7 @@ const App: React.FC = () => {
           }
           
           // Update progress based on articles processed so far
-          const articlesProcessed = Math.min(i + batchSize, readArticles.length);
+          const articlesProcessed = Math.min(i + BATCH_SIZE, readArticles.length);
           setExtractionProgress((articlesProcessed / readArticles.length) * 100);
       }
       
@@ -213,12 +215,10 @@ const App: React.FC = () => {
     setError(null);
 
     const updatedData = [...extractedData];
-    const maxRetries = 2;
-    const batchSize = 3; // Process 3 articles per API request
     
-    // Process failed articles in batches of 3
-    for (let i = 0; i < failedArticles.length; i += batchSize) {
-      const batch = failedArticles.slice(i, i + batchSize);
+    // Process failed articles in batches
+    for (let i = 0; i < failedArticles.length; i += BATCH_SIZE) {
+      const batch = failedArticles.slice(i, i + BATCH_SIZE);
       const batchNames = batch.map(a => a.name).join(', ');
       
       try {
@@ -226,7 +226,7 @@ const App: React.FC = () => {
         setLoadingMessage(`Re-extracting from ${batch.length} article(s): ${batchNames}`);
         
         // Extract data from the batch
-        const batchResults = await extractDataFromArticleBatch(batch, template, maxRetries);
+        const batchResults = await extractDataFromArticleBatch(batch, template, MAX_RETRIES);
         
         // Update results for each article in the batch
         batchResults.forEach(result => {
@@ -262,7 +262,7 @@ const App: React.FC = () => {
       }
       
       // Update progress based on articles processed so far
-      const articlesProcessed = Math.min(i + batchSize, failedArticles.length);
+      const articlesProcessed = Math.min(i + BATCH_SIZE, failedArticles.length);
       setExtractionProgress((articlesProcessed / failedArticles.length) * 100);
     }
     

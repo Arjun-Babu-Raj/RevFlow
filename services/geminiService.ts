@@ -136,13 +136,37 @@ For each article, extract the requested fields. Return an array of ${articles.le
         const parsedData = JSON.parse(data.text) as Array<Record<string, string>>;
         console.log(`Successfully extracted data from ${articles.length} articles (${articleNames}) on attempt ${attemptCount}`);
         
-        // Map results back to individual articles
-        return articles.map((article, idx) => ({
-          articleName: article.name,
-          data: parsedData[idx] || {},
-          status: 'success',
-          attemptCount
-        }));
+        // Validate that we got results for all articles
+        if (parsedData.length !== articles.length) {
+          console.warn(`Expected ${articles.length} results but got ${parsedData.length}`);
+        }
+        
+        // Map results back to individual articles with validation
+        return articles.map((article, idx) => {
+          const articleData = parsedData[idx];
+          
+          // Check if we got valid data for this article
+          if (!articleData || Object.keys(articleData).length === 0) {
+            const failedData: Record<string, string> = {};
+            template.forEach(field => {
+              failedData[field.field] = "Extraction Failed";
+            });
+            return {
+              articleName: article.name,
+              data: failedData,
+              status: 'failed' as const,
+              errorMessage: 'No data returned for this article in batch',
+              attemptCount
+            };
+          }
+          
+          return {
+            articleName: article.name,
+            data: articleData,
+            status: 'success' as const,
+            attemptCount
+          };
+        });
       } catch (parseError) {
         throw new Error('Failed to parse extraction response');
       }
