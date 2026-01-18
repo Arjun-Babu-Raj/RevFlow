@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Step } from './types';
 import type { TemplateField, ArticleFile, ExtractedDataRow } from './types';
-import { generateDescription, generateTemplate, extractDataFromArticle } from './services/geminiService';
+import { generateDescription, generateTemplate, extractDataFromArticle, extractDataFromArticleBatch } from './services/geminiService';
 
 import TitleInput from './components/TitleInput';
 import DescriptionEditor from './components/DescriptionEditor';
@@ -138,43 +138,56 @@ const App: React.FC = () => {
 
       setTimeout(() => { setIsReadingFiles(false) }, 500); // allow progress bar to hit 100%
 
-      // 2. AI Extraction Phase (Inline progress)
+      // 2. AI Extraction Phase (Inline progress with batch processing)
       setIsExtracting(true);
       setExtractionProgress(0);
       
       const allExtractedData: ExtractedDataRow[] = [];
       const maxRetries = 2;
+      const batchSize = 3; // Process 3 articles per API request
       
-      for(let i = 0; i < readArticles.length; i++) {
-          const article = readArticles[i];
+      // Process articles in batches of 3
+      for(let i = 0; i < readArticles.length; i += batchSize) {
+          const batch = readArticles.slice(i, i + batchSize);
+          const batchNames = batch.map(a => a.name).join(', ');
           
           try {
-              const result = await extractDataFromArticle(article, template, maxRetries);
+              // Update loading message for the batch
+              setLoadingMessage(`Extracting from ${batch.length} article(s): ${batchNames}`);
               
-              // Update loading message to show retry attempts
-              setLoadingMessage(`Extracting from ${article.name} (Attempt ${result.attemptCount}/${maxRetries + 1})`);
+              // Extract data from the batch
+              const batchResults = await extractDataFromArticleBatch(batch, template, maxRetries);
               
-              allExtractedData.push({ 
-                'Article Name': article.name, 
-                status: result.status,
-                errorMessage: result.errorMessage,
-                attemptCount: result.attemptCount,
-                ...result.data 
+              // Process each result from the batch
+              batchResults.forEach(result => {
+                  allExtractedData.push({ 
+                    'Article Name': result.articleName, 
+                    status: result.status,
+                    errorMessage: result.errorMessage,
+                    attemptCount: result.attemptCount,
+                    ...result.data 
+                  });
               });
           } catch (err) {
-              console.error(`Failed to process ${article.name}`, err);
-              const errorRow: ExtractedDataRow = {
-                'Article Name': article.name,
-                status: 'failed',
-                errorMessage: err instanceof Error ? err.message : 'Unknown error',
-                attemptCount: 1
-              };
-              template.forEach(field => {
-                  errorRow[field.field] = "Extraction Failed";
+              console.error(`Failed to process batch (${batchNames})`, err);
+              // Add failed entries for all articles in the batch
+              batch.forEach(article => {
+                  const errorRow: ExtractedDataRow = {
+                    'Article Name': article.name,
+                    status: 'failed',
+                    errorMessage: err instanceof Error ? err.message : 'Unknown error',
+                    attemptCount: 1
+                  };
+                  template.forEach(field => {
+                      errorRow[field.field] = "Extraction Failed";
+                  });
+                  allExtractedData.push(errorRow);
               });
-              allExtractedData.push(errorRow);
           }
-          setExtractionProgress(((i + 1) / readArticles.length) * 100);
+          
+          // Update progress based on articles processed so far
+          const articlesProcessed = Math.min(i + batchSize, readArticles.length);
+          setExtractionProgress((articlesProcessed / readArticles.length) * 100);
       }
       
       setExtractedData(allExtractedData);
@@ -201,45 +214,56 @@ const App: React.FC = () => {
 
     const updatedData = [...extractedData];
     const maxRetries = 2;
+    const batchSize = 3; // Process 3 articles per API request
     
-    for (let i = 0; i < failedArticles.length; i++) {
-      const article = failedArticles[i];
+    // Process failed articles in batches of 3
+    for (let i = 0; i < failedArticles.length; i += batchSize) {
+      const batch = failedArticles.slice(i, i + batchSize);
+      const batchNames = batch.map(a => a.name).join(', ');
       
       try {
-        const result = await extractDataFromArticle(article, template, maxRetries);
+        // Update loading message for the batch
+        setLoadingMessage(`Re-extracting from ${batch.length} article(s): ${batchNames}`);
         
-        // Update loading message to show retry attempts
-        setLoadingMessage(`Re-extracting from ${article.name} (Attempt ${result.attemptCount}/${maxRetries + 1})`);
+        // Extract data from the batch
+        const batchResults = await extractDataFromArticleBatch(batch, template, maxRetries);
         
-        // Find and update the existing row
-        const rowIndex = updatedData.findIndex(row => row['Article Name'] === article.name);
-        if (rowIndex !== -1) {
-          updatedData[rowIndex] = {
-            'Article Name': article.name,
-            status: result.status,
-            errorMessage: result.errorMessage,
-            attemptCount: result.attemptCount,
-            ...result.data
-          };
-        }
+        // Update results for each article in the batch
+        batchResults.forEach(result => {
+          const rowIndex = updatedData.findIndex(row => row['Article Name'] === result.articleName);
+          if (rowIndex !== -1) {
+            updatedData[rowIndex] = {
+              'Article Name': result.articleName,
+              status: result.status,
+              errorMessage: result.errorMessage,
+              attemptCount: result.attemptCount,
+              ...result.data
+            };
+          }
+        });
       } catch (err) {
-        console.error(`Failed to re-extract ${article.name}`, err);
-        // Update with error info
-        const rowIndex = updatedData.findIndex(row => row['Article Name'] === article.name);
-        if (rowIndex !== -1) {
-          const errorRow: ExtractedDataRow = {
-            'Article Name': article.name,
-            status: 'failed',
-            errorMessage: err instanceof Error ? err.message : 'Unknown error',
-            attemptCount: updatedData[rowIndex].attemptCount || 1
-          };
-          template.forEach(field => {
-            errorRow[field.field] = "Extraction Failed";
-          });
-          updatedData[rowIndex] = errorRow;
-        }
+        console.error(`Failed to re-extract batch (${batchNames})`, err);
+        // Update with error info for all articles in the batch
+        batch.forEach(article => {
+          const rowIndex = updatedData.findIndex(row => row['Article Name'] === article.name);
+          if (rowIndex !== -1) {
+            const errorRow: ExtractedDataRow = {
+              'Article Name': article.name,
+              status: 'failed',
+              errorMessage: err instanceof Error ? err.message : 'Unknown error',
+              attemptCount: updatedData[rowIndex].attemptCount || 1
+            };
+            template.forEach(field => {
+              errorRow[field.field] = "Extraction Failed";
+            });
+            updatedData[rowIndex] = errorRow;
+          }
+        });
       }
-      setExtractionProgress(((i + 1) / failedArticles.length) * 100);
+      
+      // Update progress based on articles processed so far
+      const articlesProcessed = Math.min(i + batchSize, failedArticles.length);
+      setExtractionProgress((articlesProcessed / failedArticles.length) * 100);
     }
     
     setExtractedData(updatedData);
