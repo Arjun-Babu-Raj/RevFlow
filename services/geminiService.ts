@@ -14,6 +14,11 @@ async function callRevFlowAPI(payload: any) {
   return response.json();
 }
 
+// Utility function for exponential backoff delays
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export async function generateDescription(title: string): Promise<string> {
   const prompt = `Based on the systematic review title "${title}", generate a concise one-paragraph description of the review's objective, scope, and primary outcomes.`;
   const data = await callRevFlowAPI({ contents: prompt });
@@ -51,8 +56,14 @@ export async function generateTemplate(description: string): Promise<TemplateFie
 
 export async function extractDataFromArticle(
   article: ArticleFile,
-  template: TemplateField[]
-): Promise<Omit<ExtractedDataRow, 'Article Name'>> {
+  template: TemplateField[],
+  maxRetries: number = 2
+): Promise<{
+  data: Omit<ExtractedDataRow, 'Article Name'>;
+  status: 'success' | 'failed';
+  errorMessage?: string;
+  attemptCount: number;
+}> {
   const templateFields = template.map(t => t.field);
   const basePrompt = `You are an expert research assistant... Data Extraction Template: ${JSON.stringify(template)}`;
 
@@ -74,19 +85,58 @@ export async function extractDataFromArticle(
     };
   }
 
-  const data = await callRevFlowAPI({
-    contents: requestContents,
-    responseMimeType: "application/json",
-    responseSchema: {
-      type: "OBJECT",
-      properties: properties,
-      required: templateFields,
+  let attemptCount = 0;
+  let lastError: Error | null = null;
+
+  // Retry loop with exponential backoff
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    attemptCount++;
+    
+    try {
+      const data = await callRevFlowAPI({
+        contents: requestContents,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: properties,
+          required: templateFields,
+        }
+      });
+
+      try {
+        const parsedData = JSON.parse(data.text);
+        console.log(`Successfully extracted data from ${article.name} on attempt ${attemptCount}`);
+        return {
+          data: parsedData,
+          status: 'success',
+          attemptCount
+        };
+      } catch (parseError) {
+        throw new Error('Failed to parse extraction response');
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Unknown error occurred');
+      console.error(`Attempt ${attemptCount}/${maxRetries + 1} failed for ${article.name}:`, lastError.message);
+      
+      // If not the last attempt, wait with exponential backoff
+      if (attempt < maxRetries) {
+        const delayMs = Math.pow(2, attempt) * 1000; // 1s, 2s
+        console.log(`Retrying ${article.name} after ${delayMs}ms...`);
+        await sleep(delayMs);
+      }
     }
+  }
+
+  // All retries exhausted
+  const failedData: any = {};
+  template.forEach(field => {
+    failedData[field.field] = "Extraction Failed";
   });
 
-  try {
-    return JSON.parse(data.text);
-  } catch (e) {
-    return {};
-  }
+  return {
+    data: failedData,
+    status: 'failed',
+    errorMessage: lastError?.message || 'Unknown error',
+    attemptCount
+  };
 }

@@ -18,6 +18,7 @@ const App: React.FC = () => {
   const [template, setTemplate] = useState<TemplateField[]>([]);
 
   const [extractedData, setExtractedData] = useState<ExtractedDataRow[]>([]);
+  const [processedArticles, setProcessedArticles] = useState<ArticleFile[]>([]);
   
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
@@ -132,6 +133,8 @@ const App: React.FC = () => {
         setFileReadProgress(((i+1) / filesToProcess.length) * 100);
       }
       
+      // Store processed articles for re-extraction
+      setProcessedArticles(readArticles);
 
       setTimeout(() => { setIsReadingFiles(false) }, 500); // allow progress bar to hit 100%
 
@@ -143,13 +146,28 @@ const App: React.FC = () => {
       
       for(let i = 0; i < readArticles.length; i++) {
           const article = readArticles[i];
-          setLoadingMessage(`Extracting from ${article.name}`); // message for screen readers/future use
+          
           try {
-              const data = await extractDataFromArticle(article, template);
-              allExtractedData.push({ 'Article Name': article.name, ...data });
+              const result = await extractDataFromArticle(article, template, 2);
+              
+              // Update loading message to show retry attempts
+              setLoadingMessage(`Extracting from ${article.name} (Attempt ${result.attemptCount}/3)`);
+              
+              allExtractedData.push({ 
+                'Article Name': article.name, 
+                status: result.status,
+                errorMessage: result.errorMessage,
+                attemptCount: result.attemptCount,
+                ...result.data 
+              });
           } catch (err) {
               console.error(`Failed to process ${article.name}`, err);
-              const errorRow: ExtractedDataRow = {'Article Name': article.name};
+              const errorRow: ExtractedDataRow = {
+                'Article Name': article.name,
+                status: 'failed',
+                errorMessage: err instanceof Error ? err.message : 'Unknown error',
+                attemptCount: 1
+              };
               template.forEach(field => {
                   errorRow[field.field] = "Extraction Failed";
               });
@@ -163,6 +181,69 @@ const App: React.FC = () => {
       setIsExtracting(false);
       setExtractionProgress(null);
   }, [template]);
+
+  const handleReExtractFailed = useCallback(async () => {
+    // Filter to get only failed articles
+    const failedArticleNames = extractedData
+      .filter(row => row.status === 'failed')
+      .map(row => row['Article Name']);
+    
+    const failedArticles = processedArticles.filter(article => 
+      failedArticleNames.includes(article.name)
+    );
+
+    if (failedArticles.length === 0) return;
+
+    setIsExtracting(true);
+    setExtractionProgress(0);
+    setError(null);
+
+    const updatedData = [...extractedData];
+    
+    for (let i = 0; i < failedArticles.length; i++) {
+      const article = failedArticles[i];
+      
+      try {
+        const result = await extractDataFromArticle(article, template, 2);
+        
+        // Update loading message to show retry attempts
+        setLoadingMessage(`Re-extracting from ${article.name} (Attempt ${result.attemptCount}/3)`);
+        
+        // Find and update the existing row
+        const rowIndex = updatedData.findIndex(row => row['Article Name'] === article.name);
+        if (rowIndex !== -1) {
+          updatedData[rowIndex] = {
+            'Article Name': article.name,
+            status: result.status,
+            errorMessage: result.errorMessage,
+            attemptCount: result.attemptCount,
+            ...result.data
+          };
+        }
+      } catch (err) {
+        console.error(`Failed to re-extract ${article.name}`, err);
+        // Update with error info
+        const rowIndex = updatedData.findIndex(row => row['Article Name'] === article.name);
+        if (rowIndex !== -1) {
+          const errorRow: ExtractedDataRow = {
+            'Article Name': article.name,
+            status: 'failed',
+            errorMessage: err instanceof Error ? err.message : 'Unknown error',
+            attemptCount: updatedData[rowIndex].attemptCount || 1
+          };
+          template.forEach(field => {
+            errorRow[field.field] = "Extraction Failed";
+          });
+          updatedData[rowIndex] = errorRow;
+        }
+      }
+      setExtractionProgress(((i + 1) / failedArticles.length) * 100);
+    }
+    
+    setExtractedData(updatedData);
+    setIsExtracting(false);
+    setExtractionProgress(null);
+  }, [template, extractedData, processedArticles]);
 
   const stepIndex = stepOrder.indexOf(step === Step.EXTRACTING ? Step.RESULTS : step);
   
@@ -225,7 +306,12 @@ const App: React.FC = () => {
           
           {step === Step.RESULTS && (
              <section ref={sectionRefs[Step.RESULTS]} id="results-section" aria-labelledby="results-heading" className="bg-gray-800 p-8 sm:p-10 rounded-xl shadow-lg border border-gray-700">
-               <ResultsTable data={extractedData} onStartOver={handleStartOver} />
+               <ResultsTable 
+                 data={extractedData} 
+                 onStartOver={handleStartOver}
+                 onReExtract={handleReExtractFailed}
+                 isExtracting={isExtracting}
+               />
             </section>
           )}
       </main>
