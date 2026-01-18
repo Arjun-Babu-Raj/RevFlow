@@ -104,7 +104,7 @@ const App: React.FC = () => {
    * Process articles in batches of 3, with automatic fallback to individual extraction
    * if batch processing fails
    */
-  const performBatchExtraction = async (
+  const performBatchExtraction = useCallback(async (
     articlesToProcess: Array<{ article: ArticleFile; originalIndex: number }>
   ): Promise<ExtractionResult[]> => {
     const BATCH_SIZE = 3;
@@ -225,7 +225,7 @@ const App: React.FC = () => {
     }
     
     return results;
-  };
+  }, [template]);
   
   const handleDataExtraction = useCallback(async (filesToProcess: File[]) => {
       // 1. File Reading Phase
@@ -303,11 +303,11 @@ const App: React.FC = () => {
     
     // Prepare failed articles for re-extraction
     const failedArticles = failedExtractions
+      .filter(row => row._articleFile) // Filter out any without article data first
       .map((row, index) => ({
         article: row._articleFile!,
         originalIndex: index
-      }))
-      .filter(item => item.article); // Filter out any without article data
+      }));
     
     if (failedArticles.length === 0) {
       setError('No article data available for retry');
