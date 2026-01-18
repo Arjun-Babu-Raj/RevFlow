@@ -21,7 +21,10 @@ export interface ArticleFile {
 
 export type ExtractedDataRow = {
   'Article Name': string;
-  [key: string]: string;
+  status: 'success' | 'failed';
+  errorMessage?: string;
+  attemptCount?: number;
+  [key: string]: string | number | undefined;
 };
 
 // This mirrors the schema from the Gemini API for typing

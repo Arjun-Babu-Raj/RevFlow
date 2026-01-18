@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Step } from './types';
 import type { TemplateField, ArticleFile, ExtractedDataRow } from './types';
-import { generateDescription, generateTemplate, extractDataFromArticle } from './services/geminiService';
+import { generateDescription, generateTemplate, extractDataFromArticle, extractDataFromArticleBatch } from './services/geminiService';
 
 import TitleInput from './components/TitleInput';
 import DescriptionEditor from './components/DescriptionEditor';
@@ -11,6 +11,10 @@ import Loader from './components/Loader';
 
 const stepOrder = [Step.TITLE, Step.DESCRIPTION, Step.TEMPLATE_UPLOAD, Step.RESULTS];
 
+// Batch processing configuration
+const BATCH_SIZE = 3; // Process 3 articles per API request for optimal quota usage
+const MAX_RETRIES = 2; // Maximum retry attempts with exponential backoff
+
 const App: React.FC = () => {
   const [step, setStep] = useState<Step>(Step.TITLE);
   const [title, setTitle] = useState<string>('');
@@ -18,6 +22,7 @@ const App: React.FC = () => {
   const [template, setTemplate] = useState<TemplateField[]>([]);
 
   const [extractedData, setExtractedData] = useState<ExtractedDataRow[]>([]);
+  const [processedArticles, setProcessedArticles] = useState<ArticleFile[]>([]);
   
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
@@ -132,30 +137,59 @@ const App: React.FC = () => {
         setFileReadProgress(((i+1) / filesToProcess.length) * 100);
       }
       
+      // Store processed articles for re-extraction
+      setProcessedArticles(readArticles);
 
       setTimeout(() => { setIsReadingFiles(false) }, 500); // allow progress bar to hit 100%
 
-      // 2. AI Extraction Phase (Inline progress)
+      // 2. AI Extraction Phase (Inline progress with batch processing)
       setIsExtracting(true);
       setExtractionProgress(0);
       
       const allExtractedData: ExtractedDataRow[] = [];
       
-      for(let i = 0; i < readArticles.length; i++) {
-          const article = readArticles[i];
-          setLoadingMessage(`Extracting from ${article.name}`); // message for screen readers/future use
+      // Process articles in batches
+      for(let i = 0; i < readArticles.length; i += BATCH_SIZE) {
+          const batch = readArticles.slice(i, i + BATCH_SIZE);
+          const batchNames = batch.map(a => a.name).join(', ');
+          
           try {
-              const data = await extractDataFromArticle(article, template);
-              allExtractedData.push({ 'Article Name': article.name, ...data });
-          } catch (err) {
-              console.error(`Failed to process ${article.name}`, err);
-              const errorRow: ExtractedDataRow = {'Article Name': article.name};
-              template.forEach(field => {
-                  errorRow[field.field] = "Extraction Failed";
+              // Update loading message for the batch
+              setLoadingMessage(`Extracting from ${batch.length} article(s): ${batchNames}`);
+              
+              // Extract data from the batch
+              const batchResults = await extractDataFromArticleBatch(batch, template, MAX_RETRIES);
+              
+              // Process each result from the batch
+              batchResults.forEach(result => {
+                  allExtractedData.push({ 
+                    'Article Name': result.articleName, 
+                    status: result.status,
+                    errorMessage: result.errorMessage,
+                    attemptCount: result.attemptCount,
+                    ...result.data 
+                  });
               });
-              allExtractedData.push(errorRow);
+          } catch (err) {
+              console.error(`Failed to process batch (${batchNames})`, err);
+              // Add failed entries for all articles in the batch
+              batch.forEach(article => {
+                  const errorRow: ExtractedDataRow = {
+                    'Article Name': article.name,
+                    status: 'failed',
+                    errorMessage: err instanceof Error ? err.message : 'Unknown error',
+                    attemptCount: 1
+                  };
+                  template.forEach(field => {
+                      errorRow[field.field] = "Extraction Failed";
+                  });
+                  allExtractedData.push(errorRow);
+              });
           }
-          setExtractionProgress(((i + 1) / readArticles.length) * 100);
+          
+          // Update progress based on articles processed so far
+          const articlesProcessed = Math.min(i + BATCH_SIZE, readArticles.length);
+          setExtractionProgress((articlesProcessed / readArticles.length) * 100);
       }
       
       setExtractedData(allExtractedData);
@@ -163,6 +197,79 @@ const App: React.FC = () => {
       setIsExtracting(false);
       setExtractionProgress(null);
   }, [template]);
+
+  const handleReExtractFailed = useCallback(async () => {
+    // Filter to get only failed articles
+    const failedArticleNames = extractedData
+      .filter(row => row.status === 'failed')
+      .map(row => row['Article Name']);
+    
+    const failedArticles = processedArticles.filter(article => 
+      failedArticleNames.includes(article.name)
+    );
+
+    if (failedArticles.length === 0) return;
+
+    setIsExtracting(true);
+    setExtractionProgress(0);
+    setError(null);
+
+    const updatedData = [...extractedData];
+    
+    // Process failed articles in batches
+    for (let i = 0; i < failedArticles.length; i += BATCH_SIZE) {
+      const batch = failedArticles.slice(i, i + BATCH_SIZE);
+      const batchNames = batch.map(a => a.name).join(', ');
+      
+      try {
+        // Update loading message for the batch
+        setLoadingMessage(`Re-extracting from ${batch.length} article(s): ${batchNames}`);
+        
+        // Extract data from the batch
+        const batchResults = await extractDataFromArticleBatch(batch, template, MAX_RETRIES);
+        
+        // Update results for each article in the batch
+        batchResults.forEach(result => {
+          const rowIndex = updatedData.findIndex(row => row['Article Name'] === result.articleName);
+          if (rowIndex !== -1) {
+            updatedData[rowIndex] = {
+              'Article Name': result.articleName,
+              status: result.status,
+              errorMessage: result.errorMessage,
+              attemptCount: result.attemptCount,
+              ...result.data
+            };
+          }
+        });
+      } catch (err) {
+        console.error(`Failed to re-extract batch (${batchNames})`, err);
+        // Update with error info for all articles in the batch
+        batch.forEach(article => {
+          const rowIndex = updatedData.findIndex(row => row['Article Name'] === article.name);
+          if (rowIndex !== -1) {
+            const errorRow: ExtractedDataRow = {
+              'Article Name': article.name,
+              status: 'failed',
+              errorMessage: err instanceof Error ? err.message : 'Unknown error',
+              attemptCount: updatedData[rowIndex].attemptCount || 1
+            };
+            template.forEach(field => {
+              errorRow[field.field] = "Extraction Failed";
+            });
+            updatedData[rowIndex] = errorRow;
+          }
+        });
+      }
+      
+      // Update progress based on articles processed so far
+      const articlesProcessed = Math.min(i + BATCH_SIZE, failedArticles.length);
+      setExtractionProgress((articlesProcessed / failedArticles.length) * 100);
+    }
+    
+    setExtractedData(updatedData);
+    setIsExtracting(false);
+    setExtractionProgress(null);
+  }, [template, extractedData, processedArticles]);
 
   const stepIndex = stepOrder.indexOf(step === Step.EXTRACTING ? Step.RESULTS : step);
   
@@ -225,7 +332,12 @@ const App: React.FC = () => {
           
           {step === Step.RESULTS && (
              <section ref={sectionRefs[Step.RESULTS]} id="results-section" aria-labelledby="results-heading" className="bg-gray-800 p-8 sm:p-10 rounded-xl shadow-lg border border-gray-700">
-               <ResultsTable data={extractedData} onStartOver={handleStartOver} />
+               <ResultsTable 
+                 data={extractedData} 
+                 onStartOver={handleStartOver}
+                 onReExtract={handleReExtractFailed}
+                 isExtracting={isExtracting}
+               />
             </section>
           )}
       </main>
