@@ -90,3 +90,81 @@ export async function extractDataFromArticle(
     return {};
   }
 }
+
+export async function extractDataFromArticleBatch(
+  articles: ArticleFile[],
+  template: TemplateField[]
+): Promise<Array<Omit<ExtractedDataRow, 'Article Name'>>> {
+  if (articles.length === 0) {
+    return [];
+  }
+
+  const templateFields = template.map(t => t.field);
+  const properties: any = {};
+  template.forEach(item => {
+    properties[item.field] = { type: "STRING", description: item.description };
+  });
+
+  // Build batch prompt
+  const basePrompt = `You are an expert research assistant extracting data from multiple research articles.
+
+Data Extraction Template:
+${JSON.stringify(template, null, 2)}
+
+Process each of the following ${articles.length} article(s) and return a JSON array with extraction results in the same order.`;
+
+  // Collect all article parts
+  const parts: any[] = [{ text: basePrompt }];
+
+  for (let i = 0; i < articles.length; i++) {
+    const article = articles[i];
+    const articleNumber = i + 1;
+    
+    if (article.mimeType.startsWith('text/')) {
+      const textContent = atob(article.content.split(',')[1]);
+      parts.push({ 
+        text: `\n\n---ARTICLE ${articleNumber}: ${article.name}---\n${textContent}\n---END ARTICLE ${articleNumber}---` 
+      });
+    } else {
+      parts.push({ 
+        text: `\n\n---ARTICLE ${articleNumber}: ${article.name}---` 
+      });
+      parts.push({ 
+        inlineData: { 
+          data: article.content.split(',')[1], 
+          mimeType: article.mimeType 
+        } 
+      });
+      parts.push({ 
+        text: `\n---END ARTICLE ${articleNumber}---` 
+      });
+    }
+  }
+
+  parts.push({ 
+    text: `\n\nReturn a JSON array of exactly ${articles.length} object(s), each containing the extracted fields. Maintain the same order as the input articles.` 
+  });
+
+  const requestContents = { parts };
+
+  const data = await callRevFlowAPI({
+    contents: requestContents,
+    responseMimeType: "application/json",
+    responseSchema: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: properties,
+        required: templateFields,
+      }
+    }
+  });
+
+  try {
+    return JSON.parse(data.text);
+  } catch (e) {
+    console.error("Failed to parse batch extraction response:", e);
+    // Return empty objects for each article if parsing fails
+    return articles.map(() => ({}));
+  }
+}

@@ -10,6 +10,7 @@ interface TemplateReviewAndUploadProps {
   fileReadProgress: number | null;
   isExtracting: boolean;
   extractionProgress: number | null;
+  batchInfo: { current: number; total: number; articleRange: string } | null;
 }
 
 const TemplateReviewAndUpload: React.FC<TemplateReviewAndUploadProps> = ({ 
@@ -20,7 +21,8 @@ const TemplateReviewAndUpload: React.FC<TemplateReviewAndUploadProps> = ({
     isReadingFiles,
     fileReadProgress,
     isExtracting,
-    extractionProgress
+    extractionProgress,
+    batchInfo
 }) => {
   const [files, setFiles] = useState<File[]>([]);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -137,7 +139,11 @@ const TemplateReviewAndUpload: React.FC<TemplateReviewAndUploadProps> = ({
         {(isReadingFiles || isExtracting) && (
           <div className="pt-4 space-y-3">
             <p className="text-base font-medium text-gray-300">
-              {isExtracting ? 'Extracting data from articles...' : 'Preparing files...'}
+              {isExtracting 
+                ? (batchInfo 
+                    ? `Processing batch ${batchInfo.current} of ${batchInfo.total} (${batchInfo.articleRange})` 
+                    : 'Extracting data from articles...')
+                : 'Preparing files...'}
             </p>
             <div className="w-full bg-gray-600 rounded-full h-3">
               <div 
