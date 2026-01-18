@@ -143,15 +143,16 @@ const App: React.FC = () => {
       setExtractionProgress(0);
       
       const allExtractedData: ExtractedDataRow[] = [];
+      const maxRetries = 2;
       
       for(let i = 0; i < readArticles.length; i++) {
           const article = readArticles[i];
           
           try {
-              const result = await extractDataFromArticle(article, template, 2);
+              const result = await extractDataFromArticle(article, template, maxRetries);
               
               // Update loading message to show retry attempts
-              setLoadingMessage(`Extracting from ${article.name} (Attempt ${result.attemptCount}/3)`);
+              setLoadingMessage(`Extracting from ${article.name} (Attempt ${result.attemptCount}/${maxRetries + 1})`);
               
               allExtractedData.push({ 
                 'Article Name': article.name, 
@@ -199,15 +200,16 @@ const App: React.FC = () => {
     setError(null);
 
     const updatedData = [...extractedData];
+    const maxRetries = 2;
     
     for (let i = 0; i < failedArticles.length; i++) {
       const article = failedArticles[i];
       
       try {
-        const result = await extractDataFromArticle(article, template, 2);
+        const result = await extractDataFromArticle(article, template, maxRetries);
         
         // Update loading message to show retry attempts
-        setLoadingMessage(`Re-extracting from ${article.name} (Attempt ${result.attemptCount}/3)`);
+        setLoadingMessage(`Re-extracting from ${article.name} (Attempt ${result.attemptCount}/${maxRetries + 1})`);
         
         // Find and update the existing row
         const rowIndex = updatedData.findIndex(row => row['Article Name'] === article.name);

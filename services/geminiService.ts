@@ -128,7 +128,7 @@ export async function extractDataFromArticle(
   }
 
   // All retries exhausted
-  const failedData: any = {};
+  const failedData: Record<string, string> = {};
   template.forEach(field => {
     failedData[field.field] = "Extraction Failed";
   });
